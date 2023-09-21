@@ -1,0 +1,19 @@
+# Binaries
+go-check-color
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build directories
+bin/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+

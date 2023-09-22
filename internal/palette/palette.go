@@ -280,3 +280,67 @@ func SavePalettePreview(path string, palette []RGB, counts []int) error {
     return png.Encode(f, img)
 }
 
+// ComposeWithPaletteStrip returns a new image: original content with a vertical palette strip on the right.
+// The strip shows colors sorted by frequency, stacked vertically with heights proportional to shares.
+func ComposeWithPaletteStrip(src image.Image, palette []RGB, counts []int, stripWidth int) image.Image {
+    if stripWidth <= 0 {
+        stripWidth = 1
+    }
+    entries := makeEntries(palette, counts)
+    b := src.Bounds()
+    w := b.Dx()
+    h := b.Dy()
+    out := image.NewRGBA(image.Rect(0, 0, w+stripWidth, h))
+
+    // Copy original image into the left part
+    for y := 0; y < h; y++ {
+        for x := 0; x < w; x++ {
+            out.Set(x, y, src.At(b.Min.X+x, b.Min.Y+y))
+        }
+    }
+
+    // Draw vertical palette strip on the right
+    total := 0
+    for _, e := range entries {
+        total += e.Count
+    }
+    if total == 0 {
+        total = 1
+    }
+    yCursor := 0
+    for i, e := range entries {
+        // Height proportional to share. Ensure at least 1px if count > 0.
+        blockH := int(math.Round(float64(h) * e.Share))
+        if e.Count > 0 && blockH == 0 {
+            blockH = 1
+        }
+        if i == len(entries)-1 {
+            // Ensure we fill to the bottom to avoid gaps due to rounding
+            if yCursor+blockH < h {
+                blockH = h - yCursor
+            }
+        }
+        clr := color.RGBA{R: e.Color.R, G: e.Color.G, B: e.Color.B, A: 255}
+        for yy := yCursor; yy < yCursor+blockH && yy < h; yy++ {
+            for xx := w; xx < w+stripWidth; xx++ {
+                out.SetRGBA(xx, yy, clr)
+            }
+        }
+        yCursor += blockH
+        if yCursor >= h {
+            break
+        }
+    }
+    // If rounding left empty space, fill with last color
+    if yCursor < h && len(entries) > 0 {
+        last := entries[len(entries)-1].Color
+        clr := color.RGBA{R: last.R, G: last.G, B: last.B, A: 255}
+        for yy := yCursor; yy < h; yy++ {
+            for xx := w; xx < w+stripWidth; xx++ {
+                out.SetRGBA(xx, yy, clr)
+            }
+        }
+    }
+    return out
+}
+

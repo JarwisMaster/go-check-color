@@ -8,6 +8,8 @@ import (
     "image/png"
     "math"
     "os"
+    "runtime"
+    "sync"
     "sort"
 )
 
@@ -20,14 +22,43 @@ type RGB struct {
 func CollectPixels(img image.Image) []RGB {
     b := img.Bounds()
     width, height := b.Dx(), b.Dy()
-    pixels := make([]RGB, 0, width*height)
-    for y := b.Min.Y; y < b.Max.Y; y++ {
-        for x := b.Min.X; x < b.Max.X; x++ {
-            r, g, b, _ := img.At(x, y).RGBA()
-            pixels = append(pixels, RGB{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8)})
+    n := width * height
+    pixels := make([]RGB, n)
+
+    switch src := img.(type) {
+    case *image.RGBA:
+        i := 0
+        for y := 0; y < height; y++ {
+            row := src.Pix[y*src.Stride : y*src.Stride+width*4]
+            for x := 0; x < width; x++ {
+                off := x * 4
+                pixels[i] = RGB{row[off], row[off+1], row[off+2]}
+                i++
+            }
         }
+        return pixels
+    case *image.NRGBA:
+        i := 0
+        for y := 0; y < height; y++ {
+            row := src.Pix[y*src.Stride : y*src.Stride+width*4]
+            for x := 0; x < width; x++ {
+                off := x * 4
+                pixels[i] = RGB{row[off], row[off+1], row[off+2]}
+                i++
+            }
+        }
+        return pixels
+    default:
+        i := 0
+        for y := b.Min.Y; y < b.Max.Y; y++ {
+            for x := b.Min.X; x < b.Max.X; x++ {
+                r, g, bb, _ := img.At(x, y).RGBA()
+                pixels[i] = RGB{uint8(r >> 8), uint8(g >> 8), uint8(bb >> 8)}
+                i++
+            }
+        }
+        return pixels
     }
-    return pixels
 }
 
 type colorBox struct {
@@ -68,24 +99,65 @@ func medianCutSplit(pxs []RGB) ([]RGB, []RGB) {
     if ranges[2] > ranges[dominant] {
         dominant = 2
     }
-
-    sort.Slice(pxs, func(i, j int) bool {
-        switch dominant {
-        case 0:
-            return pxs[i].R < pxs[j].R
-        case 1:
-            return pxs[i].G < pxs[j].G
-        default:
-            return pxs[i].B < pxs[j].B
-        }
-    })
-
     mid := len(pxs) / 2
+    nthElementByChannel(pxs, mid, dominant)
     left := make([]RGB, mid)
     right := make([]RGB, len(pxs)-mid)
     copy(left, pxs[:mid])
     copy(right, pxs[mid:])
     return left, right
+}
+
+func nthElementByChannel(a []RGB, n int, ch int) {
+    if n <= 0 || n >= len(a) {
+        return
+    }
+    lo, hi := 0, len(a)-1
+    for lo < hi {
+        p := partitionByChannel(a, lo, hi, ch)
+        if n == p {
+            return
+        } else if n < p {
+            hi = p - 1
+        } else {
+            lo = p + 1
+        }
+    }
+}
+
+func channelValue(c RGB, ch int) uint8 {
+    switch ch {
+    case 0:
+        return c.R
+    case 1:
+        return c.G
+    default:
+        return c.B
+    }
+}
+
+func partitionByChannel(a []RGB, lo, hi, ch int) int {
+    pivot := channelValue(a[(lo+hi)/2], ch)
+    i, j := lo, hi
+    for i <= j {
+        for channelValue(a[i], ch) < pivot {
+            i++
+        }
+        for channelValue(a[j], ch) > pivot {
+            j--
+        }
+        if i <= j {
+            a[i], a[j] = a[j], a[i]
+            i++
+            j--
+        }
+    }
+    if lo <= j {
+        if n := (lo + j) / 2; false { // no-op to keep structure similar to classic impl
+            _ = n
+        }
+    }
+    return i - 1
 }
 
 func averageColor(pxs []RGB) RGB {
@@ -109,40 +181,126 @@ func medianColor(pxs []RGB) RGB {
     if len(pxs) == 0 {
         return RGB{0, 0, 0}
     }
+    if len(pxs) <= 3 {
+        var rsum, gsum, bsum int
+        for _, p := range pxs {
+            rsum += int(p.R)
+            gsum += int(p.G)
+            bsum += int(p.B)
+        }
+        n := len(pxs)
+        return RGB{uint8(rsum / n), uint8(gsum / n), uint8(bsum / n)}
+    }
     n := len(pxs)
-    rr := make([]int, n)
-    gg := make([]int, n)
-    bb := make([]int, n)
-    for i, p := range pxs {
-        rr[i] = int(p.R)
-        gg[i] = int(p.G)
-        bb[i] = int(p.B)
-    }
-    sort.Ints(rr)
-    sort.Ints(gg)
-    sort.Ints(bb)
+    mid := n / 2
     if n%2 == 1 {
-        mid := n / 2
-        return RGB{uint8(rr[mid]), uint8(gg[mid]), uint8(bb[mid])}
+        return RGB{
+            nthElementR(pxs, mid),
+            nthElementG(pxs, mid),
+            nthElementB(pxs, mid),
+        }
+    } else {
+        r1, r2 := nthElementR(pxs, mid-1), nthElementR(pxs, mid)
+        g1, g2 := nthElementG(pxs, mid-1), nthElementG(pxs, mid)
+        b1, b2 := nthElementB(pxs, mid-1), nthElementB(pxs, mid)
+        return RGB{
+            uint8((int(r1) + int(r2)) / 2),
+            uint8((int(g1) + int(g2)) / 2),
+            uint8((int(b1) + int(b2)) / 2),
+        }
     }
-    r := uint8(math.Round(float64(rr[n/2-1]+rr[n/2]) / 2.0))
-    g := uint8(math.Round(float64(gg[n/2-1]+gg[n/2]) / 2.0))
-    b := uint8(math.Round(float64(bb[n/2-1]+bb[n/2]) / 2.0))
-    return RGB{r, g, b}
+}
+
+func nthElementR(pxs []RGB, k int) uint8 {
+    temp := make([]uint8, len(pxs))
+    for i, p := range pxs {
+        temp[i] = p.R
+    }
+    return quickSelectUint8(temp, k)
+}
+
+func nthElementG(pxs []RGB, k int) uint8 {
+    temp := make([]uint8, len(pxs))
+    for i, p := range pxs {
+        temp[i] = p.G
+    }
+    return quickSelectUint8(temp, k)
+}
+
+func nthElementB(pxs []RGB, k int) uint8 {
+    temp := make([]uint8, len(pxs))
+    for i, p := range pxs {
+        temp[i] = p.B
+    }
+    return quickSelectUint8(temp, k)
+}
+
+func quickSelectUint8(arr []uint8, k int) uint8 {
+    if k >= len(arr) {
+        k = len(arr) - 1
+    }
+    lo, hi := 0, len(arr)-1
+    for lo < hi {
+        p := partitionUint8(arr, lo, hi)
+        if k == p {
+            return arr[k]
+        } else if k < p {
+            hi = p - 1
+        } else {
+            lo = p + 1
+        }
+    }
+    return arr[lo]
+}
+
+func partitionUint8(arr []uint8, lo, hi int) int {
+    pivot := arr[(lo+hi)/2]
+    i, j := lo, hi
+    for i <= j {
+        for arr[i] < pivot {
+            i++
+        }
+        for arr[j] > pivot {
+            j--
+        }
+        if i <= j {
+            arr[i], arr[j] = arr[j], arr[i]
+            i++
+            j--
+        }
+    }
+    return i - 1
 }
 
 func MedianCutPalette(pixels []RGB, k int) []RGB {
     if k <= 0 {
         return nil
     }
-    boxes := []colorBox{{Pixels: pixels}}
+    if k == 1 {
+        return []RGB{averageColor(pixels)}
+    }
+    if len(pixels) <= k {
+        result := make([]RGB, len(pixels))
+        copy(result, pixels)
+        for len(result) < k {
+            result = append(result, result[len(result)-1])
+        }
+        return result
+    }
+    
+    boxes := make([]colorBox, 1, k)
+    boxes[0] = colorBox{Pixels: pixels}
+    
     for len(boxes) < k {
-        widestIdx := 0
+        widestIdx := -1
         widestRange := -1
-        for i, b := range boxes {
-            r := channelRange(b.Pixels, 0)
-            g := channelRange(b.Pixels, 1)
-            bRange := channelRange(b.Pixels, 2)
+        for i := range boxes {
+            if len(boxes[i].Pixels) <= 1 {
+                continue
+            }
+            r := channelRange(boxes[i].Pixels, 0)
+            g := channelRange(boxes[i].Pixels, 1)
+            bRange := channelRange(boxes[i].Pixels, 2)
             maxRange := r
             if g > maxRange {
                 maxRange = g
@@ -155,46 +313,94 @@ func MedianCutPalette(pixels []RGB, k int) []RGB {
                 widestIdx = i
             }
         }
-
-        if len(boxes[widestIdx].Pixels) <= 1 {
+        if widestIdx == -1 {
             break
         }
-
         left, right := medianCutSplit(boxes[widestIdx].Pixels)
-        boxes = append(boxes[:widestIdx], append([]colorBox{{Pixels: left}, {Pixels: right}}, boxes[widestIdx+1:]...)...)
+        boxes[widestIdx] = colorBox{Pixels: left}
+        boxes = append(boxes, colorBox{Pixels: right})
     }
 
     palette := make([]RGB, 0, len(boxes))
-    for _, b := range boxes {
+    for i := range boxes {
+        b := &boxes[i]
         palette = append(palette, medianColor(b.Pixels))
     }
-    for len(palette) < k && len(palette) > 0 {
+    for len(palette) < k {
         palette = append(palette, palette[len(palette)-1])
     }
     return palette
 }
 
 func CountOccurrences(pixels []RGB, palette []RGB) []int {
-    counts := make([]int, len(palette))
-    for _, p := range pixels {
-        bestIdx := 0
-        bestDist := math.MaxFloat64
-        for i, c := range palette {
-            d := colorDistanceSq(p, c)
-            if d < bestDist {
-                bestDist = d
-                bestIdx = i
+    if len(palette) == 0 || len(pixels) == 0 {
+        return make([]int, len(palette))
+    }
+    workers := runtime.GOMAXPROCS(0)
+    if workers < 2 || len(pixels) < 5000 {
+        
+        counts := make([]int, len(palette))
+        for _, px := range pixels {
+            bestIdx := 0
+            best := colorDistanceSqInt(px, palette[0])
+            for i := 1; i < len(palette); i++ {
+                d := colorDistanceSqInt(px, palette[i])
+                if d < best {
+                    best = d
+                    bestIdx = i
+                }
             }
+            counts[bestIdx]++
         }
-        counts[bestIdx]++
+        return counts
+    }
+    type part struct{ from, to int }
+    parts := make([]part, 0, workers)
+    step := (len(pixels) + workers - 1) / workers
+    for i := 0; i < len(pixels); i += step {
+        j := i + step
+        if j > len(pixels) {
+            j = len(pixels)
+        }
+        parts = append(parts, part{from: i, to: j})
+    }
+    partials := make([][]int, len(parts))
+    var wg sync.WaitGroup
+    wg.Add(len(parts))
+    for idx, pr := range parts {
+        idx, pr := idx, pr
+        go func() {
+            defer wg.Done()
+            cnt := make([]int, len(palette))
+            for _, px := range pixels[pr.from:pr.to] {
+                bestIdx := 0
+                best := colorDistanceSqInt(px, palette[0])
+                for i := 1; i < len(palette); i++ {
+                    d := colorDistanceSqInt(px, palette[i])
+                    if d < best {
+                        best = d
+                        bestIdx = i
+                    }
+                }
+                cnt[bestIdx]++
+            }
+            partials[idx] = cnt
+        }()
+    }
+    wg.Wait()
+    counts := make([]int, len(palette))
+    for _, p := range partials {
+        for i := range counts {
+            counts[i] += p[i]
+        }
     }
     return counts
 }
 
-func colorDistanceSq(a, b RGB) float64 {
-    dr := float64(int(a.R) - int(b.R))
-    dg := float64(int(a.G) - int(b.G))
-    db := float64(int(a.B) - int(b.B))
+func colorDistanceSqInt(a, b RGB) int {
+    dr := int(a.R) - int(b.R)
+    dg := int(a.G) - int(b.G)
+    db := int(a.B) - int(b.B)
     return dr*dr + dg*dg + db*db
 }
 
@@ -292,14 +498,20 @@ func ComposeWithPaletteStrip(src image.Image, palette []RGB, counts []int, strip
     h := b.Dy()
     out := image.NewRGBA(image.Rect(0, 0, w+stripWidth, h))
 
-    // Copy original image into the left part
-    for y := 0; y < h; y++ {
-        for x := 0; x < w; x++ {
-            out.Set(x, y, src.At(b.Min.X+x, b.Min.Y+y))
+    if rgba, ok := src.(*image.RGBA); ok && b.Min.X == 0 && b.Min.Y == 0 {
+        for y := 0; y < h; y++ {
+            srcRow := rgba.Pix[y*rgba.Stride : y*rgba.Stride+w*4]
+            dstRow := out.Pix[y*out.Stride : y*out.Stride+w*4]
+            copy(dstRow, srcRow)
+        }
+    } else {
+        for y := 0; y < h; y++ {
+            for x := 0; x < w; x++ {
+                out.Set(x, y, src.At(b.Min.X+x, b.Min.Y+y))
+            }
         }
     }
 
-    // Draw vertical palette strip on the right
     total := 0
     for _, e := range entries {
         total += e.Count
@@ -309,21 +521,23 @@ func ComposeWithPaletteStrip(src image.Image, palette []RGB, counts []int, strip
     }
     yCursor := 0
     for i, e := range entries {
-        // Height proportional to share. Ensure at least 1px if count > 0.
         blockH := int(math.Round(float64(h) * e.Share))
         if e.Count > 0 && blockH == 0 {
             blockH = 1
         }
         if i == len(entries)-1 {
-            // Ensure we fill to the bottom to avoid gaps due to rounding
             if yCursor+blockH < h {
                 blockH = h - yCursor
             }
         }
-        clr := color.RGBA{R: e.Color.R, G: e.Color.G, B: e.Color.B, A: 255}
         for yy := yCursor; yy < yCursor+blockH && yy < h; yy++ {
+            rowStart := yy * out.Stride
             for xx := w; xx < w+stripWidth; xx++ {
-                out.SetRGBA(xx, yy, clr)
+                idx := rowStart + xx*4
+                out.Pix[idx] = e.Color.R
+                out.Pix[idx+1] = e.Color.G
+                out.Pix[idx+2] = e.Color.B
+                out.Pix[idx+3] = 255
             }
         }
         yCursor += blockH
@@ -331,13 +545,16 @@ func ComposeWithPaletteStrip(src image.Image, palette []RGB, counts []int, strip
             break
         }
     }
-    // If rounding left empty space, fill with last color
     if yCursor < h && len(entries) > 0 {
         last := entries[len(entries)-1].Color
-        clr := color.RGBA{R: last.R, G: last.G, B: last.B, A: 255}
         for yy := yCursor; yy < h; yy++ {
+            rowStart := yy * out.Stride
             for xx := w; xx < w+stripWidth; xx++ {
-                out.SetRGBA(xx, yy, clr)
+                idx := rowStart + xx*4
+                out.Pix[idx] = last.R
+                out.Pix[idx+1] = last.G
+                out.Pix[idx+2] = last.B
+                out.Pix[idx+3] = 255
             }
         }
     }

@@ -19,6 +19,7 @@ type RGB struct {
     B uint8 `json:"b"`
 }
 
+// CollectPixels: fast-path for RGBA/NRGBA; fallback to generic At(). Avoids RGBA() per-pixel cost.
 func CollectPixels(img image.Image) []RGB {
     b := img.Bounds()
     width, height := b.Dx(), b.Dy()
@@ -27,6 +28,7 @@ func CollectPixels(img image.Image) []RGB {
 
     switch src := img.(type) {
     case *image.RGBA:
+        // 1) Fast path: tight loop over backing Pix for RGBA.
         i := 0
         for y := 0; y < height; y++ {
             row := src.Pix[y*src.Stride : y*src.Stride+width*4]
@@ -38,6 +40,7 @@ func CollectPixels(img image.Image) []RGB {
         }
         return pixels
     case *image.NRGBA:
+        // 2) Fast path: same idea for NRGBA.
         i := 0
         for y := 0; y < height; y++ {
             row := src.Pix[y*src.Stride : y*src.Stride+width*4]
@@ -49,6 +52,7 @@ func CollectPixels(img image.Image) []RGB {
         }
         return pixels
     default:
+        // 3) Generic path: use At()/RGBA() when memory layout is unknown.
         i := 0
         for y := b.Min.Y; y < b.Max.Y; y++ {
             for x := b.Min.X; x < b.Max.X; x++ {
@@ -90,7 +94,9 @@ func channelRange(pxs []RGB, ch int) int {
     return maxv - minv
 }
 
+// medianCutSplit: nth-element (quickselect) by dominant channel instead of full sort.
 func medianCutSplit(pxs []RGB) ([]RGB, []RGB) {
+    // 1) Pick dominant channel by range.
     ranges := []int{channelRange(pxs, 0), channelRange(pxs, 1), channelRange(pxs, 2)}
     dominant := 0
     if ranges[1] > ranges[dominant] {
@@ -99,8 +105,10 @@ func medianCutSplit(pxs []RGB) ([]RGB, []RGB) {
     if ranges[2] > ranges[dominant] {
         dominant = 2
     }
+    // 2) Partition in-place around median along dominant channel.
     mid := len(pxs) / 2
     nthElementByChannel(pxs, mid, dominant)
+    // 3) Split into two boxes.
     left := make([]RGB, mid)
     right := make([]RGB, len(pxs)-mid)
     copy(left, pxs[:mid])
@@ -276,6 +284,7 @@ func MedianCutPalette(pixels []RGB, k int) []RGB {
     if k <= 0 {
         return nil
     }
+    // 1) Trivial cases.
     if k == 1 {
         return []RGB{averageColor(pixels)}
     }
@@ -287,11 +296,12 @@ func MedianCutPalette(pixels []RGB, k int) []RGB {
         }
         return result
     }
-    
+    // 2) Start from a single box and iteratively split the widest.
     boxes := make([]colorBox, 1, k)
     boxes[0] = colorBox{Pixels: pixels}
     
     for len(boxes) < k {
+        // 2.1) Find the box with max channel spread.
         widestIdx := -1
         widestRange := -1
         for i := range boxes {
@@ -316,26 +326,32 @@ func MedianCutPalette(pixels []RGB, k int) []RGB {
         if widestIdx == -1 {
             break
         }
+        // 2.2) Split by median cut along dominant channel.
         left, right := medianCutSplit(boxes[widestIdx].Pixels)
+        // 2.3) Replace original with left, append right.
         boxes[widestIdx] = colorBox{Pixels: left}
         boxes = append(boxes, colorBox{Pixels: right})
     }
 
+    // 3) Reduce each box to a representative color (median per channel).
     palette := make([]RGB, 0, len(boxes))
     for i := range boxes {
         b := &boxes[i]
         palette = append(palette, medianColor(b.Pixels))
     }
+    // 4) Pad if splits ran out early.
     for len(palette) < k {
         palette = append(palette, palette[len(palette)-1])
     }
     return palette
 }
 
+// CountOccurrences: single-thread for small inputs; fan-out with goroutines for large.
 func CountOccurrences(pixels []RGB, palette []RGB) []int {
     if len(palette) == 0 || len(pixels) == 0 {
         return make([]int, len(palette))
     }
+    // 1) Small inputs: single-thread; large: fan-out by chunks.
     workers := runtime.GOMAXPROCS(0)
     if workers < 2 || len(pixels) < 5000 {
         
@@ -354,6 +370,7 @@ func CountOccurrences(pixels []RGB, palette []RGB) []int {
         }
         return counts
     }
+    // 2) Split into roughly equal parts and process in parallel.
     type part struct{ from, to int }
     parts := make([]part, 0, workers)
     step := (len(pixels) + workers - 1) / workers
@@ -388,6 +405,7 @@ func CountOccurrences(pixels []RGB, palette []RGB) []int {
         }()
     }
     wg.Wait()
+    // 3) Merge partial histograms.
     counts := make([]int, len(palette))
     for _, p := range partials {
         for i := range counts {
@@ -397,6 +415,7 @@ func CountOccurrences(pixels []RGB, palette []RGB) []int {
     return counts
 }
 
+// colorDistanceSqInt: int math to avoid float overhead.
 func colorDistanceSqInt(a, b RGB) int {
     dr := int(a.R) - int(b.R)
     dg := int(a.G) - int(b.G)
@@ -498,6 +517,7 @@ func ComposeWithPaletteStrip(src image.Image, palette []RGB, counts []int, strip
     h := b.Dy()
     out := image.NewRGBA(image.Rect(0, 0, w+stripWidth, h))
 
+    // 1) Copy source pixels (fast path for RGBA; fallback to At()).
     if rgba, ok := src.(*image.RGBA); ok && b.Min.X == 0 && b.Min.Y == 0 {
         for y := 0; y < h; y++ {
             srcRow := rgba.Pix[y*rgba.Stride : y*rgba.Stride+w*4]
@@ -512,6 +532,7 @@ func ComposeWithPaletteStrip(src image.Image, palette []RGB, counts []int, strip
         }
     }
 
+    // 2) Draw vertical palette strip with heights proportional to shares.
     total := 0
     for _, e := range entries {
         total += e.Count
@@ -545,6 +566,7 @@ func ComposeWithPaletteStrip(src image.Image, palette []RGB, counts []int, strip
             break
         }
     }
+    // 3) Fill any rounding gap with the last color.
     if yCursor < h && len(entries) > 0 {
         last := entries[len(entries)-1].Color
         for yy := yCursor; yy < h; yy++ {

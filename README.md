@@ -1,5 +1,10 @@
 # go-check-color
 
+<p align="center">
+  <img src="in.png" alt="input example" width="45%"/>
+  <img src="out.png" alt="output with palette strip" width="45%"/>
+</p>
+
 CLI to extract a color palette from images using median cut, count color shares, and compose output with a vertical palette strip on the right.
 
 ## Install
